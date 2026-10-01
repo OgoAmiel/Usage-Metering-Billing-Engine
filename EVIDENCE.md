@@ -186,10 +186,95 @@ The suite includes the two existing metering/quota tests plus 11 tests in `test_
 
 The warnings concern deprecated FastAPI startup hooks and the Starlette/AnyIO test-client alias.
 
+### Cancellation: observed tenant state
+
+After the sandbox cancellation workflow, the developer supplied this usage result. Formatting was normalized from chat; the exact cancellation event time and delivery log have not yet been supplied.
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/usage/demo-free" | ConvertTo-Json -Depth 5
+```
+
+```json
+{
+  "tenant_id": "demo-free",
+  "plan": "free",
+  "subscription_status": "canceled",
+  "api_calls": {"used": 1, "limit": 1000},
+  "ai_tokens": {"used": 125, "limit": 100000},
+  "cost_microcents": 1400,
+  "pricing": {
+    "api_call_microcents": 1000,
+    "input_token_microcents": 3,
+    "cached_input_token_microcents": 1,
+    "output_token_microcents": 12,
+    "reasoning_token_microcents": 12
+  }
+}
+```
+
+The API shows Free/canceled with Free quotas restored, while usage and cost remain unchanged. This records the resulting tenant state; it does not independently establish the cancellation webhook's event ID or delivery response.
+
 ### Remaining webhook checks
 
-- Pending: real Stripe cancellation/deletion synchronization (`customer.subscription.deleted`).
+- Pending: attach the `customer.subscription.deleted` event ID and listener delivery/status lines to complete the cancellation delivery evidence.
 - Other status transitions have local test coverage above, but have not been exercised end-to-end against Stripe.
+
+## Monthly usage periods
+
+UTC calendar-month quotas and costs are filtered by `created_at >= period_start AND created_at < period_end`. Historical events and tenant-wide idempotency records remain intact. No reset job or schema change is required; the existing tenant/timestamp index supports the query.
+
+Verification command:
+
+```powershell
+.\venv\Scripts\python.exe -m pytest -q
+```
+
+Actual result after the monthly-period change:
+
+```text
+19 passed, 3 warnings in 5.35s
+```
+
+Six cases in `test_monthly_usage.py` use temporary databases and controlled clocks: September-to-October quota/cost rollover with historical retention and cross-month replay; December-to-January, leap February, and non-leap February boundaries; next-month exclusion; and a single metering timestamp across midnight. The other 13 tests also passed. No Stripe calls are made by these tests.
+
+### Observed October usage response
+
+On 2026-10-01, the developer ran the following against the running local API and supplied the output below (chat formatting normalized):
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/usage/demo-free" | ConvertTo-Json -Depth 5
+```
+
+```json
+{
+  "tenant_id": "demo-free",
+  "plan": "free",
+  "subscription_status": "canceled",
+  "period": {
+    "start": "2026-10-01T00:00:00+00:00",
+    "end": "2026-11-01T00:00:00+00:00",
+    "timezone": "UTC"
+  },
+  "api_calls": {
+    "used": 0,
+    "limit": 1000
+  },
+  "ai_tokens": {
+    "used": 0,
+    "limit": 100000
+  },
+  "cost_microcents": 0,
+  "pricing": {
+    "api_call_microcents": 1000,
+    "input_token_microcents": 3,
+    "cached_input_token_microcents": 1,
+    "output_token_microcents": 12,
+    "reasoning_token_microcents": 12
+  }
+}
+```
+
+The response reports the October UTC calendar month with zero usage and cost, while retaining the Free plan, canceled subscription status, and Free quotas. September's previously observed usage is excluded from these current-month totals. Historical record retention is covered by the local rollover test above; this API response alone does not inspect stored history.
 
 ## Pricing math
 

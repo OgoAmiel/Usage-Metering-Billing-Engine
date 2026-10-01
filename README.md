@@ -18,6 +18,8 @@ The initial schema is documented in `migrations/001_initial.sql`; the app applie
 
 - A `(tenant_id, idempotency_key)` unique constraint plus one write transaction prevents duplicate metering.
 - The exact quota is allowed; only the request above it returns `429`.
+- Usage quotas and costs cover the UTC calendar month: first-day midnight inclusive through next-month midnight exclusive. `GET /usage/{tenant_id}` returns these boundaries in `period`. This is independent of Stripe's subscription anniversary billing dates.
+- A new month starts with fresh quota automatically through timestamp filtering; historical events are retained. Idempotency keys remain tenant-wide across months, so retrying an old request returns its original response without new usage. Use a new key for a new action.
 - All money is integer microcents. Cached input has its own lower price; reasoning tokens use output-token pricing.
 - Stripe is test mode only. Webhook signature verification happens before state changes; each Stripe event ID is processed once.
 
@@ -49,4 +51,4 @@ Set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` in `.env`, then run `stripe 
 
 ## Limitations
 
-This is a learning-sized engine: SQLite, a single billing period, no invoices, proration, or production job queue. It should not process live payments without further operational hardening.
+This is a learning-sized engine: SQLite, current UTC calendar-month summaries only, no invoices, proration, or production job queue. Historical events remain stored, but there is no historical-month query endpoint. It should not process live payments without further operational hardening.

@@ -38,6 +38,14 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def monthly_period(at: str) -> tuple[str, str]:
+    """UTC calendar month: inclusive start, exclusive next-month start."""
+    moment = datetime.fromisoformat(at).astimezone(timezone.utc)
+    start = moment.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
+    return start.isoformat(), end.isoformat()
+
+
 @contextmanager
 def db(write: bool = False):
     connection = sqlite3.connect(DB_PATH, timeout=15, isolation_level=None)
@@ -122,12 +130,14 @@ def calculate_cost(body: GenerateRequest) -> int:
             + body.reasoning_tokens * PRICING["reasoning_token_microcents"])
 
 
-def usage_row(conn: sqlite3.Connection, tenant_id: str) -> sqlite3.Row:
+def usage_row(conn: sqlite3.Connection, tenant_id: str, at: str | None = None) -> sqlite3.Row:
+    start, end = monthly_period(at or utcnow())
     row = conn.execute("""SELECT t.id, t.plan_id, t.subscription_status, p.api_call_limit, p.token_limit,
       COALESCE(SUM(e.api_calls), 0) api_calls, COALESCE(SUM(e.input_tokens + e.cached_input_tokens + e.output_tokens + e.reasoning_tokens), 0) tokens,
       COALESCE(SUM(e.cost_microcents), 0) cost_microcents
       FROM tenants t JOIN plans p ON p.id=t.plan_id LEFT JOIN usage_events e ON e.tenant_id=t.id
-      WHERE t.id=? GROUP BY t.id""", (tenant_id,)).fetchone()
+      AND e.created_at >= ? AND e.created_at < ?
+      WHERE t.id=? GROUP BY t.id""", (start, end, tenant_id)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="tenant not found")
     return row
@@ -156,7 +166,10 @@ def generate(body: GenerateRequest, idempotency_key: str | None = Header(default
                              (body.tenant_id, idempotency_key)).fetchone()
         if saved:
             return json.loads(saved["payload"])
-        summary = usage_row(conn, body.tenant_id)
+        # Capture once after acquiring the write lock so checking and recording
+        # use the same month even when the request crosses midnight.
+        recorded_at = utcnow()
+        summary = usage_row(conn, body.tenant_id, recorded_at)
         if summary["subscription_status"] != "active":
             raise HTTPException(status_code=402, detail="subscription is not active; upgrade or update payment")
         next_calls = summary["api_calls"] + 1
@@ -168,7 +181,7 @@ def generate(body: GenerateRequest, idempotency_key: str | None = Header(default
         event_id = str(uuid.uuid4())
         conn.execute("""INSERT INTO usage_events VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
                      (event_id, body.tenant_id, idempotency_key, body.input_tokens, body.cached_input_tokens,
-                      body.output_tokens, body.reasoning_tokens, cost, utcnow()))
+                      body.output_tokens, body.reasoning_tokens, cost, recorded_at))
         response = {"event_id": event_id, "accepted": True, "cost_microcents": cost, "idempotent_replay": False}
         conn.execute("INSERT INTO idempotency_responses VALUES (?, ?, ?, ?)",
                      (body.tenant_id, idempotency_key, 200, json.dumps(response)))
@@ -177,9 +190,12 @@ def generate(body: GenerateRequest, idempotency_key: str | None = Header(default
 
 @app.get("/usage/{tenant_id}")
 def get_usage(tenant_id: str):
+    at = utcnow()
+    start, end = monthly_period(at)
     with db() as conn:
-        row = usage_row(conn, tenant_id)
+        row = usage_row(conn, tenant_id, at)
     return {"tenant_id": tenant_id, "plan": row["plan_id"], "subscription_status": row["subscription_status"],
+            "period": {"start": start, "end": end, "timezone": "UTC"},
             "api_calls": {"used": row["api_calls"], "limit": row["api_call_limit"]},
             "ai_tokens": {"used": row["tokens"], "limit": row["token_limit"]},
             "cost_microcents": row["cost_microcents"], "pricing": PRICING}
