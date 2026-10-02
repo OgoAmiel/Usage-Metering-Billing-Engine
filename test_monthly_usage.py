@@ -12,6 +12,8 @@ def setup(tmp_path, monkeypatch):
         with main.db(write=True) as db:
             db.execute("INSERT INTO tenants (id,name,plan_id) VALUES ('t','Test','free')")
             db.execute("UPDATE plans SET api_call_limit=1,token_limit=10 WHERE id='free'")
+            key = main.issue_tenant_key(db, 't')
+        client.headers['Authorization'] = f'Bearer {key}'
         yield client, clock
 
 

@@ -1,4 +1,4 @@
-run: .\\venv\\Scripts\\uvicorn.exe main:app --reload
+run: .\\venv\\Scripts\\uvicorn.exe main:app --reload --env-file .env
 seed: .\\venv\\Scripts\\python.exe seed.py
 test: .\\venv\\Scripts\\python.exe -m pytest -q
 base_url: http://localhost:8000

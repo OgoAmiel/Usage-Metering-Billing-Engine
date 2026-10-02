@@ -17,6 +17,8 @@ def client(tmp_path, monkeypatch):
     with TestClient(main.app) as client:
         with main.db(write=True) as conn:
             conn.execute("INSERT INTO tenants (id,name,plan_id) VALUES ('t1','Test','pro')")
+            key = main.issue_tenant_key(conn, 't1')
+        client.headers['Authorization'] = f'Bearer {key}'
         yield client
 
 

@@ -7,12 +7,15 @@ import json
 import os
 import sqlite3
 import uuid
+import secrets
+from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
 import stripe
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 DB_PATH = os.getenv("DATABASE_PATH", "./billing.db")
@@ -32,6 +35,44 @@ PLANS = {
 }
 
 app = FastAPI(title="Usage Metering & Billing Engine", version="1.0.0")
+bearer = HTTPBearer(auto_error=False)
+
+
+def key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def bearer_token(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> str:
+    if credentials is None:
+        raise HTTPException(401, "missing or invalid API key", headers={"WWW-Authenticate": "Bearer"})
+    return credentials.credentials
+
+
+def require_admin(token: str = Depends(bearer_token)) -> None:
+    expected = os.getenv("ADMIN_API_KEY", "")
+    if len(expected) < 32 or "replace_me" in expected:
+        raise HTTPException(503, "admin authentication is not configured")
+    if not hmac.compare_digest(key_hash(token), key_hash(expected)):
+        raise HTTPException(403, "admin access required")
+
+
+def authenticated_tenant(token: str = Depends(bearer_token)) -> str:
+    with db() as conn:
+        row = conn.execute("SELECT k.tenant_id FROM tenant_api_keys k JOIN tenants t ON t.id=k.tenant_id WHERE k.key_hash=?", (key_hash(token),)).fetchone()
+    if not row:
+        raise HTTPException(401, "missing or invalid API key", headers={"WWW-Authenticate": "Bearer"})
+    return row["tenant_id"]
+
+
+def require_owner(requested: str, authenticated: str) -> None:
+    if requested != authenticated:
+        raise HTTPException(403, "access to another tenant is forbidden")
+
+
+def issue_tenant_key(conn: sqlite3.Connection, tenant_id: str) -> str:
+    key = "tenant_" + secrets.token_urlsafe(32)
+    conn.execute("INSERT INTO tenant_api_keys (tenant_id,key_hash) VALUES (?,?) ON CONFLICT(tenant_id) DO UPDATE SET key_hash=excluded.key_hash", (tenant_id, key_hash(key)))
+    return key
 
 
 def utcnow() -> str:
@@ -97,6 +138,7 @@ def init_db() -> None:
         for plan_id, plan in PLANS.items():
             conn.execute("INSERT OR IGNORE INTO plans VALUES (?, ?, ?)",
                          (plan_id, plan["api_call_limit"], plan["token_limit"]))
+        conn.executescript(Path(__file__).with_name("migrations").joinpath("002_tenant_api_keys.sql").read_text(encoding="utf-8"))
 
 
 @app.on_event("startup")
@@ -143,8 +185,8 @@ def usage_row(conn: sqlite3.Connection, tenant_id: str, at: str | None = None) -
     return row
 
 
-@app.post("/tenants", status_code=201)
-def create_tenant(body: TenantRequest):
+@app.post("/tenants", status_code=201, dependencies=[Depends(require_admin)])
+def create_tenant(body: TenantRequest, response: Response):
     if body.plan_id not in PLANS:
         raise HTTPException(422, "plan_id must be free or pro")
     with db(write=True) as conn:
@@ -152,11 +194,24 @@ def create_tenant(body: TenantRequest):
             conn.execute("INSERT INTO tenants (id,name,plan_id) VALUES (?, ?, ?)", (body.id, body.name, body.plan_id))
         except sqlite3.IntegrityError:
             raise HTTPException(409, "tenant already exists")
-    return {"id": body.id, "plan_id": body.plan_id}
+        key = issue_tenant_key(conn, body.id)
+    response.headers["Cache-Control"] = "no-store"
+    return {"id": body.id, "plan_id": body.plan_id, "api_key": key}
+
+
+@app.post("/tenants/{tenant_id}/api-key", dependencies=[Depends(require_admin)])
+def rotate_tenant_key(tenant_id: str, response: Response):
+    with db(write=True) as conn:
+        if not conn.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone():
+            raise HTTPException(404, "tenant not found")
+        key = issue_tenant_key(conn, tenant_id)
+    response.headers["Cache-Control"] = "no-store"
+    return {"tenant_id": tenant_id, "api_key": key}
 
 
 @app.post("/generate")
-def generate(body: GenerateRequest, idempotency_key: str | None = Header(default=None)):
+def generate(body: GenerateRequest, idempotency_key: str | None = Header(default=None), tenant: str = Depends(authenticated_tenant)):
+    require_owner(body.tenant_id, tenant)
     if not idempotency_key:
         raise HTTPException(400, "Idempotency-Key header is required")
     if len(idempotency_key) > 255:
@@ -189,7 +244,8 @@ def generate(body: GenerateRequest, idempotency_key: str | None = Header(default
 
 
 @app.get("/usage/{tenant_id}")
-def get_usage(tenant_id: str):
+def get_usage(tenant_id: str, tenant: str = Depends(authenticated_tenant)):
+    require_owner(tenant_id, tenant)
     at = utcnow()
     start, end = monthly_period(at)
     with db() as conn:
@@ -202,7 +258,8 @@ def get_usage(tenant_id: str):
 
 
 @app.post("/checkout/{tenant_id}")
-def checkout(tenant_id: str):
+def checkout(tenant_id: str, tenant: str = Depends(authenticated_tenant)):
+    require_owner(tenant_id, tenant)
     with db() as conn:
         usage_row(conn, tenant_id)
     key = os.getenv("STRIPE_SECRET_KEY")
@@ -284,7 +341,7 @@ def run_rollup_job(job_id: str) -> None:
             conn.execute("UPDATE jobs SET status='failed',attempts=attempts+1,error=?,finished_at=? WHERE id=?", (str(exc), utcnow(), job_id))
 
 
-@app.post("/jobs/rollup", status_code=202)
+@app.post("/jobs/rollup", status_code=202, dependencies=[Depends(require_admin)])
 def enqueue_rollup(background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     with db(write=True) as conn:
@@ -293,7 +350,7 @@ def enqueue_rollup(background_tasks: BackgroundTasks):
     return {"job_id": job_id, "status": "queued"}
 
 
-@app.get("/jobs/{job_id}")
+@app.get("/jobs/{job_id}", dependencies=[Depends(require_admin)])
 def get_job(job_id: str):
     with db() as conn:
         job = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()

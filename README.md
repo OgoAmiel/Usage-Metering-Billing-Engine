@@ -25,18 +25,35 @@ The initial schema is documented in `migrations/001_initial.sql`; the app applie
 
 ## Run locally
 
+Tenant routes now require `Authorization: Bearer <tenant-api-key>`. Missing/invalid keys return 401; another tenant's ID returns 403 before database usage or Stripe actions. Tenant creation, key issuance/rotation and all job routes require a separate admin bearer key. Stripe webhooks retain signature authentication and do not require a tenant key.
+
+Generate an admin secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"` and put it in `.env` as `ADMIN_API_KEY`. Never commit it. A missing/placeholder admin key fails closed. Restart the server after changing `.env`.
+
 ```powershell
 Copy-Item .env.example .env
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
 .\venv\Scripts\python.exe seed.py
-.\venv\Scripts\uvicorn.exe main:app --reload
+.\venv\Scripts\uvicorn.exe main:app --reload --env-file .env
 ```
 
-In another terminal:
+In another terminal, enter your admin secret privately and issue a key for the seeded tenant (issuing again invalidates its old key):
 
 ```powershell
-Invoke-RestMethod -Method Post http://localhost:8000/generate -Headers @{"Idempotency-Key"="demo-1"} -ContentType application/json -Body '{"tenant_id":"demo-free","cached_input_tokens":100,"reasoning_tokens":25}'
-Invoke-RestMethod http://localhost:8000/usage/demo-free
+$adminCredential = Get-Credential -UserName admin -Message "Enter ADMIN_API_KEY as the password"
+$adminHeaders = @{Authorization = "Bearer " + $adminCredential.GetNetworkCredential().Password}
+$issued = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/tenants/demo-free/api-key" -Headers $adminHeaders
+$tenantHeaders = @{Authorization = "Bearer " + $issued.api_key}
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/usage/demo-free" -Headers $tenantHeaders
+```
+
+Keys are random 256-bit values stored only as SHA-256 hashes in `tenant_api_keys`; key responses use `Cache-Control: no-store`. Save the returned key privately; it cannot be retrieved later. Seed does not assign default keys or reset existing subscriptions. Outside localhost, use HTTPS. Browser login, user accounts, automatic key expiry and rate limiting are not implemented.
+
+To meter usage for an active tenant:
+
+```powershell
+$tenantHeaders["Idempotency-Key"] = "demo-1"
+Invoke-RestMethod -Method Post http://localhost:8000/generate -Headers $tenantHeaders -ContentType application/json -Body '{"tenant_id":"demo-free","cached_input_tokens":100,"reasoning_tokens":25}'
+Invoke-RestMethod http://localhost:8000/usage/demo-free -Headers $tenantHeaders
 ```
 
 Run checks with `.\venv\Scripts\python.exe -m pytest -q`.
