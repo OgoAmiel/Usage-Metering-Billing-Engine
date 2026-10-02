@@ -20,7 +20,7 @@ The boundary test creates a plan with a limit of one call, accepts the first req
 
 ### Completed sandbox Checkout upgrades the tenant
 
-Observed on 2026-09-29. The following output was supplied by I from the Stripe CLI and the local API. Formatting was normalized from chat; no credentials are included.
+Observed on 2026-09-29. The following output was supplied by the developer from the Stripe CLI and the local API. Formatting was normalized from chat; no credentials are included.
 
 The app and listener used the same Stripe sandbox account, `acct_1UInwOF3gJzrtdpO`. Before Checkout, `demo-free` had plan `free`, an API-call limit of 1,000, and a token limit of 100,000.
 
@@ -67,7 +67,7 @@ This demonstrates successful sandbox Checkout, webhook delivery and acceptance, 
 
 ### Forged webhook signature rejected
 
-Executed by I on 2026-09-29 against the local API. Commands and output were normalized from the supplied chat transcript.
+Executed by the developer on 2026-09-29 against the local API. Commands and output were normalized from the supplied chat transcript.
 
 ```powershell
 curl.exe -i -X POST "http://127.0.0.1:8000/webhooks/stripe" -H "Content-Type: application/json" -H "Stripe-Signature: deliberately-invalid" --data-raw "{}"
@@ -89,7 +89,7 @@ A subsequent `GET /usage/demo-free` returned the same values as before the forge
 
 ### Duplicate delivery of the same event
 
-I replayed the original successful Checkout event:
+The developer replayed the original successful Checkout event:
 
 ```powershell
 stripe events resend evt_1UKzZuF3gJzrtdpO6vY11Bif
@@ -124,7 +124,7 @@ The original processing timestamp is 13:52:11 SAST, before the replay at 14:10:5
 
 ### Subscription update synchronization
 
-Verified on 2026-09-30 against the existing Stripe sandbox subscription `sub_1UKzZtF3gJzrtdpOhgBrosOK`. Adding `tenant_id: demo-free` to its metadata generated a real `customer.subscription.updated` event without changing its price or billing schedule. I resent the event after starting the listener:
+Verified on 2026-09-30 against the existing Stripe sandbox subscription `sub_1UKzZtF3gJzrtdpOhgBrosOK`. Adding `tenant_id: demo-free` to its metadata generated a real `customer.subscription.updated` event without changing its price or billing schedule. The developer resent the event after starting the listener:
 
 ```powershell
 stripe events resend evt_1ULKxlF3gJzrtdpO6zY3eEuq
@@ -147,7 +147,7 @@ Relevant fields from the Stripe response (excerpt; unrelated fields omitted):
 }
 ```
 
-I also supplied the listener's delivery confirmation (URLs and escaped underscores normalized from chat):
+The developer also supplied the listener's delivery confirmation (URLs and escaped underscores normalized from chat):
 
 ```text
 2026-09-30 12:43:48   --> customer.subscription.updated [evt_1ULKxlF3gJzrtdpO6zY3eEuq]
@@ -188,7 +188,7 @@ The warnings concern deprecated FastAPI startup hooks and the Starlette/AnyIO te
 
 ### Cancellation: observed tenant state
 
-After the sandbox cancellation workflow, I supplied this usage result. Formatting was normalized from chat; the exact cancellation event time and delivery log have not yet been supplied.
+After the sandbox cancellation workflow, the developer supplied this usage result. Formatting was normalized from chat; the exact cancellation event time and delivery log have not yet been supplied.
 
 ```powershell
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/usage/demo-free" | ConvertTo-Json -Depth 5
@@ -239,7 +239,7 @@ Six cases in `test_monthly_usage.py` use temporary databases and controlled cloc
 
 ### Observed October usage response
 
-On 2026-10-01, I ran the following against the running local API and supplied the output below (chat formatting normalized):
+On 2026-10-01, the developer ran the following against the running local API and supplied the output below (chat formatting normalized):
 
 ```powershell
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/usage/demo-free" | ConvertTo-Json -Depth 5
@@ -298,7 +298,7 @@ Earlier transcripts above predate authentication and now require an Authorizatio
 
 ### Manual tenant read isolation
 
-On 2026-10-02, I tested the running API using the same valid `demo-free` bearer key for both requests. `$tenantHeaders` holds that key locally; no credential value is included here. Commands and output were normalized from the supplied chat transcripts.
+On 2026-10-02, the developer tested the running API using the same valid `demo-free` bearer key for both requests. `$tenantHeaders` holds that key locally; no credential value is included here. Commands and output were normalized from the supplied chat transcripts.
 
 ```powershell
 foreach ($tenant in @("demo-free", "demo-pro")) {
@@ -321,7 +321,7 @@ demo-pro : HTTP 403
 {"detail":"access to another tenant is forbidden"}
 ```
 
-I also repeated the cross-tenant request directly:
+The developer also repeated the cross-tenant request directly:
 
 ```powershell
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/usage/demo-pro" -Headers $tenantHeaders
